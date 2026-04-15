@@ -1,0 +1,2 @@
+playwright>=1.40.0
+anthropic>=0.25.0    # optional — only needed if using --use-llm flag

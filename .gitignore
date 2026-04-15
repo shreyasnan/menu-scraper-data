@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.db-journal
+*.db-wal
+*.db-shm
+.venv/
+node_modules/
