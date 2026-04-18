@@ -20,8 +20,27 @@ from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright, Page, Browser
 
 from .base import BaseScraper, ScrapeResult, MenuItem
+from ..junk_filter import is_junk_name, clean_text as clean_junk_text
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_and_clean(items: list[MenuItem]) -> list[MenuItem]:
+    """Drop nav/UI/social junk and strip HTML residue from surviving items.
+
+    Applied at the very end of scraping so the DB never gets polluted with
+    "Decline All", "Facebook", year-stamps, or HTML-tag artifacts again.
+    """
+    cleaned: list[MenuItem] = []
+    for item in items:
+        name = clean_junk_text(item.name)
+        if not name or is_junk_name(name):
+            continue
+        item.name = name
+        item.description = clean_junk_text(item.description)
+        item.category = clean_junk_text(item.category)
+        cleaned.append(item)
+    return cleaned
 
 # CSS selectors commonly used by restaurant websites and menu plugins
 MENU_SELECTORS = [
@@ -97,6 +116,10 @@ class WebsiteScraper(BaseScraper):
                 # Fallback: extract page text and use LLM
                 page_text = await menu_page.inner_text("body")
                 items = await self._llm_extract(page_text, url)
+
+            # Drop nav/UI/social junk and strip HTML residue before storage.
+            # See menu_scraper/junk_filter.py for the rule set.
+            items = _filter_and_clean(items)
 
             result.items = items
             result.categories = list(set(item.category for item in items if item.category))
