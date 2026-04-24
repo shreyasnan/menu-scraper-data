@@ -1,2 +1,4 @@
 playwright>=1.40.0
-anthropic>=0.25.0    # optional — only needed if using --use-llm flag
+anthropic>=0.25.0          # optional — only needed if using --use-llm flag
+firebase-admin>=6.5.0      # used by backfill_firestore_place_ids.py
+google-cloud-storage>=2.16  # used by push_menus_to_storage.py

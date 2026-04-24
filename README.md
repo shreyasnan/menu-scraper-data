@@ -18,7 +18,13 @@ The `menu-scraper-daily` Cowork scheduled task does:
 4. (Sundays only) Run OSM Overpass discovery and `seed_from_osm.py` to enqueue new restaurants
 5. Re-enqueue the 200 stalest successful rows (set `scrape_status='pending'`)
 6. Loop `python batch_chunk.py 30` until the queue drains
-7. `git add bay_area_menus.db && git commit && git push`
+7. Push per-restaurant menus to Firebase Storage so the ForkBook iOS app can read them:
+   ```bash
+   export GOOGLE_APPLICATION_CREDENTIALS="$PWD/../firebase-admin-key.json"
+   python push_menus_to_storage.py
+   ```
+   Uploads `menus/{placeId}.json` for every restaurant with `place_match_status = 'matched'`. Idempotent (MD5-skips unchanged blobs), so safe to re-run daily. Read by `MenuDataService.swift` in the iOS app.
+8. `git add bay_area_menus.db && git commit && git push`
 
 ## Stats (last update committed in git history)
 

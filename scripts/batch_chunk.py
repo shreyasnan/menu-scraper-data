@@ -16,6 +16,8 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
+from menu_scraper.jsonld import parse_menu_from_ld_blocks
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
@@ -144,41 +146,34 @@ def extract_items_from_text(text):
     return items[:150]
 
 
-async def extract_structured(page):
-    # JSON-LD
+async def try_jsonld(page):
+    """Grab every JSON-LD <script> body from the current DOM and hand
+    them to the Python parser. Returns {items, follow_url}. Items is
+    always a list (possibly empty); follow_url is a string when the
+    page's Restaurant.hasMenu points to a separate menu page we should
+    navigate to and re-extract from."""
     try:
-        jld = await page.evaluate("""() => {
+        ld_strings = await page.evaluate("""() => {
             const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-            const items = [];
-            for (const s of scripts) {
-                try {
-                    const d = JSON.parse(s.textContent);
-                    const walk = (obj) => {
-                        if (!obj||typeof obj!=='object') return;
-                        if (Array.isArray(obj)){obj.forEach(walk);return;}
-                        if (obj['@type']==='MenuItem'){
-                            const p=obj.offers?.price||null;
-                            items.push({name:obj.name,description:obj.description||'',price:p?parseFloat(p):null,price_text:p?'$'+p:'',category:''});
-                        }
-                        if (obj.hasMenuSection){
-                            for(const sec of(Array.isArray(obj.hasMenuSection)?obj.hasMenuSection:[obj.hasMenuSection])){
-                                const cat=sec.name||'';
-                                for(const mi of(sec.hasMenuItem||[])){
-                                    const p=mi.offers?.price||null;
-                                    items.push({name:mi.name,description:mi.description||'',price:p?parseFloat(p):null,price_text:p?'$'+p:'',category:cat});
-                                }
-                            }
-                        }
-                        for(const v of Object.values(obj)) walk(v);
-                    };
-                    walk(d);
-                } catch{}
-            }
-            return items;
+            return Array.from(scripts).map(s => s.textContent || '');
         }""")
-        if jld:
-            return [i for i in jld if i.get("name")]
-    except: pass
+    except Exception:
+        return {"items": [], "follow_url": None}
+
+    if not ld_strings:
+        return {"items": [], "follow_url": None}
+
+    try:
+        return parse_menu_from_ld_blocks(ld_strings)
+    except Exception:
+        return {"items": [], "follow_url": None}
+
+
+async def extract_structured(page):
+    # JSON-LD (schema.org Menu / Restaurant.hasMenu → inline items)
+    ld = await try_jsonld(page)
+    if ld["items"]:
+        return ld["items"]
 
     # CSS patterns
     try:
@@ -251,19 +246,35 @@ async def scrape_one(context, rid, name, website, conn, sem):
                 if any(x in (title or "").lower() for x in ["404","not found","error","access denied","forbidden"]):
                     error = f"Bad page: {title[:80]}"
                 else:
-                    # Try menu page nav
-                    ml = await page.evaluate("""()=>{
-                        const a=Array.from(document.querySelectorAll('a'));
-                        const m=a.find(x=>{const t=(x.textContent||'').toLowerCase().trim();const h=(x.href||'').toLowerCase();
-                            return(t==='menu'||t==='our menu'||t==='food menu'||t==='food & drink'||t==='view menu'||h.includes('/menu'))&&x.href&&x.href.startsWith('http');});
-                        return m?m.href:null;
-                    }""")
-                    if ml and ml != page.url:
+                    # 1. Peek at JSON-LD on the landing page first — it may
+                    #    have inline items OR a hasMenu URL that points us
+                    #    directly at the real menu page.
+                    ld = await try_jsonld(page)
+                    items = ld["items"]
+                    menu_url = ld["follow_url"]
+
+                    # 2. If JSON-LD didn't give us a URL, fall back to a
+                    #    text-match on anchors (existing heuristic).
+                    if not items and not menu_url:
+                        menu_url = await page.evaluate("""()=>{
+                            const a=Array.from(document.querySelectorAll('a'));
+                            const m=a.find(x=>{const t=(x.textContent||'').toLowerCase().trim();const h=(x.href||'').toLowerCase();
+                                return(t==='menu'||t==='our menu'||t==='food menu'||t==='food & drink'||t==='view menu'||h.includes('/menu'))&&x.href&&x.href.startsWith('http');});
+                            return m?m.href:null;
+                        }""")
+
+                    # 3. Navigate to the menu page if different, then
+                    #    re-run the full extractor stack there.
+                    if (not items) and menu_url and menu_url != page.url:
                         try:
-                            await page.goto(ml, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+                            await page.goto(menu_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
                             await page.wait_for_timeout(SETTLE_MS)
                         except: pass
-                    items = await extract_structured(page)
+                        items = await extract_structured(page)
+                    elif not items:
+                        items = await extract_structured(page)
+
+                    # 4. Final fallback: pure text-heuristic on body.
                     if not items:
                         try:
                             text = await page.inner_text("body")
@@ -280,6 +291,13 @@ async def scrape_one(context, rid, name, website, conn, sem):
         status = "success" if items else ("failed" if error else "no_items")
         try:
             conn.execute("UPDATE restaurants SET scrape_status=?,items_found=?,error_message=?,scrape_duration=?,scraped_at=datetime('now') WHERE id=?",(status,len(items),error,round(dur,2),rid))
+            # Clear any prior items for this restaurant — a re-scrape
+            # should replace, not accumulate. Previously a bug: repeated
+            # scrapes doubled up menu_items rows. Safe to run even when
+            # the current scrape produced nothing (we'd just wipe stale
+            # data, which is the correct behaviour if the site stopped
+            # listing the menu).
+            conn.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
             if items:
                 conn.executemany("INSERT INTO menu_items(restaurant_id,category,name,description,price,price_text,dietary_tags)VALUES(?,?,?,?,?,?,?)",
                     [(rid,i.get("category",""),i["name"],i.get("description",""),i.get("price"),i.get("price_text",""),"") for i in items])
