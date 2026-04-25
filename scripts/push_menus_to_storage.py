@@ -47,6 +47,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from menu_scraper.dish_normalizer import normalize_dish
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -135,35 +137,45 @@ def build_menu_payload(
     priceless = [d for d in dishes if not (d["price"] is not None and d["price"] > 0)]
     ordered = priced + priceless
 
-    # Dedupe on (normalized name, price). The scraper sometimes inserts the
-    # same dish twice — re-scrape instead of upsert, probably — and the
-    # iOS UI shouldn't show the same dish twice. Keep "Salad $8" and
-    # "Salad $12" distinct since that's a real menu choice.
+    # Dedupe on (cleaned name, price). The scraper sometimes inserts
+    # the same dish twice; the iOS UI shouldn't show the same dish
+    # twice. Keep "Salad $8" and "Salad $12" distinct since that's a
+    # real menu choice.
     seen: set[tuple[str, float]] = set()
     dish_payload = []
     dropped_noise = 0
     for d in ordered:
-        name = (d["name"] or "").strip()
-        if not name:
+        raw_name = (d["name"] or "").strip()
+        if not raw_name:
             continue
-        # Skip scraper noise: section headers, description prose, etc.
-        # Logged in aggregate per restaurant so we can spot scraper drift.
-        if not is_dishlike(name):
+        # Skip scraper noise (section headers, contact info, prose) on
+        # the RAW name — the noise filter is tuned for unprocessed
+        # scraper output.
+        if not is_dishlike(raw_name):
             dropped_noise += 1
             continue
+
         price = d["price"]
         price_val = float(price) if (price is not None and price > 0) else 0.0
-        dedupe_key = (name.lower(), price_val)
+
+        # Normalize: split fused name+description, title-case lowercase
+        # menus (CSS text-transform artifacts). See
+        # menu_scraper/dish_normalizer.py for the heuristics.
+        # Conservative — clean inputs pass through unchanged.
+        item = normalize_dish(
+            raw_name,
+            d["description"],
+            price_val if price_val > 0 else None,
+        )
+
+        # Dedupe on the CLEANED name so post-normalization duplicates
+        # collapse (e.g. two raw inputs that title-case to the same
+        # canonical name).
+        dedupe_key = (item["n"].lower(), price_val)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
 
-        item: dict = {"n": name}
-        desc = (d["description"] or "").strip()
-        if desc:
-            item["d"] = desc
-        if price_val > 0:
-            item["p"] = price_val
         dish_payload.append(item)
 
     scraped_at = row["scraped_at"]
