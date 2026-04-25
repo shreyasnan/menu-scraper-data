@@ -75,6 +75,26 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_items_rest ON menu_items(restaurant_id);
         CREATE INDEX IF NOT EXISTS idx_items_name ON menu_items(name);
     """)
+
+    # Migrations: idempotent column adds for fields owned by other
+    # scripts (resolve_places.py, push_menus_to_storage.py,
+    # backfill_firestore_place_ids.py). Keeping them here means the
+    # daily task always boots into a known-good schema even if the
+    # repo gets rolled back to a commit that predates these columns.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(restaurants)").fetchall()}
+    migrations = [
+        ("address",                "ALTER TABLE restaurants ADD COLUMN address TEXT"),
+        ("google_place_id",        "ALTER TABLE restaurants ADD COLUMN google_place_id TEXT"),
+        ("place_matched_name",     "ALTER TABLE restaurants ADD COLUMN place_matched_name TEXT"),
+        ("place_match_confidence", "ALTER TABLE restaurants ADD COLUMN place_match_confidence REAL"),
+        ("place_match_status",     "ALTER TABLE restaurants ADD COLUMN place_match_status TEXT"),
+        ("place_resolved_at",      "ALTER TABLE restaurants ADD COLUMN place_resolved_at TEXT"),
+        ("last_scraped_at",        "ALTER TABLE restaurants ADD COLUMN last_scraped_at TEXT"),
+    ]
+    for col, sql in migrations:
+        if col not in existing:
+            logger.info(f"Schema migration: adding restaurants.{col}")
+            conn.execute(sql)
     conn.commit()
     return conn
 
