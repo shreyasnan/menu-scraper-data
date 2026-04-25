@@ -74,8 +74,13 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-def _candidate_sql(only_useful: bool, redo_review: bool, has_items: bool) -> str:
-    """SQL for restaurants that still need resolution."""
+def _candidate_sql(
+    only_useful: bool,
+    redo_review: bool,
+    has_items: bool,
+    cuisines: list[str] | None = None,
+) -> tuple[str, list]:
+    """SQL for restaurants that still need resolution. Returns (query, params)."""
     conds = [
         "(r.place_match_status IS NULL OR r.place_match_status = 'no_match'",
     ]
@@ -84,8 +89,16 @@ def _candidate_sql(only_useful: bool, redo_review: bool, has_items: bool) -> str
     conds[0] += ")"
     conds.append("r.name IS NOT NULL AND r.name != ''")
 
+    params: list = []
+    if cuisines:
+        # Match if `cuisine` LIKE any of the patterns (case-insensitive
+        # via LOWER). OSM cuisines are often semi-colon separated lists
+        # like "italian;pizza" so we use substring matching.
+        like_clauses = " OR ".join(["LOWER(r.cuisine) LIKE ?"] * len(cuisines))
+        conds.append(f"({like_clauses})")
+        params.extend(f"%{c.lower()}%" for c in cuisines)
+
     if only_useful:
-        # The "relaxed" bar from cleanup_menu_db.py: ≥10 items, ≥5 rich
         quality_join = """
         JOIN (
             SELECT restaurant_id
@@ -100,19 +113,16 @@ def _candidate_sql(only_useful: bool, redo_review: bool, has_items: bool) -> str
     else:
         quality_join = ""
         if has_items:
-            # Weaker filter than --only-useful: just needs the scraper to
-            # have found *something*. Catches menus where the extractor
-            # fused name+description (leaving description NULL, which the
-            # stricter bar treats as "no rich row").
             conds.append("r.items_found > 0")
 
-    return f"""
+    sql = f"""
         SELECT r.id, r.name, r.city
         FROM restaurants r
         {quality_join}
         WHERE {' AND '.join(conds)}
         ORDER BY r.id
     """
+    return sql, params
 
 
 def main():
@@ -124,7 +134,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--db", default=None)
     parser.add_argument("--redo-review", action="store_true")
+    parser.add_argument("--cuisines", default=None,
+                        help="Comma-separated cuisine substrings to filter by "
+                             "(e.g. 'indian,italian,mexican,pizza'). Matches "
+                             "OSM cuisine tags case-insensitively, including "
+                             "semicolon-separated lists like 'italian;pizza'.")
     args = parser.parse_args()
+    cuisines = [c.strip() for c in args.cuisines.split(",")] if args.cuisines else None
 
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY")
     if not api_key:
@@ -140,9 +156,10 @@ def main():
     _ensure_schema(con)
     cur = con.cursor()
 
-    rows = cur.execute(
-        _candidate_sql(args.only_useful, args.redo_review, args.has_items)
-    ).fetchall()
+    sql, params = _candidate_sql(
+        args.only_useful, args.redo_review, args.has_items, cuisines=cuisines
+    )
+    rows = cur.execute(sql, params).fetchall()
     if args.limit:
         rows = rows[: args.limit]
 
