@@ -232,7 +232,13 @@ async def extract_structured(page):
     return []
 
 
-async def scrape_one(context, rid, name, website, conn, sem):
+async def scrape_one(context, rid, name, website, sem):
+    """Scrape one restaurant. Each task opens its own SQLite connection
+    for the DB write block at the end — sharing a single connection
+    across 8 concurrent async tasks under WAL mode + AUTOINCREMENT
+    interleaves writes badly enough to corrupt the btree (rowids out
+    of order, page init failures). Per-task connections serialize on
+    SQLite's file-level write lock instead, which is correct."""
     async with sem:
         start = time.time()
         items = []
@@ -289,21 +295,36 @@ async def scrape_one(context, rid, name, website, conn, sem):
 
         dur = time.time() - start
         status = "success" if items else ("failed" if error else "no_items")
+
+        # Per-task connection. Closes after commit. busy_timeout makes
+        # us wait up to 10s for the write lock instead of erroring out
+        # under contention.
+        local_conn = sqlite3.connect(DB_PATH)
         try:
-            conn.execute("UPDATE restaurants SET scrape_status=?,items_found=?,error_message=?,scrape_duration=?,scraped_at=datetime('now') WHERE id=?",(status,len(items),error,round(dur,2),rid))
-            # Clear any prior items for this restaurant — a re-scrape
-            # should replace, not accumulate. Previously a bug: repeated
-            # scrapes doubled up menu_items rows. Safe to run even when
-            # the current scrape produced nothing (we'd just wipe stale
-            # data, which is the correct behaviour if the site stopped
-            # listing the menu).
-            conn.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
+            local_conn.execute("PRAGMA busy_timeout=10000")
+            local_conn.execute("BEGIN IMMEDIATE")
+            local_conn.execute(
+                "UPDATE restaurants SET scrape_status=?,items_found=?,error_message=?,scrape_duration=?,scraped_at=datetime('now') WHERE id=?",
+                (status, len(items), error, round(dur, 2), rid),
+            )
+            # Clear prior items for this restaurant — a re-scrape
+            # should replace, not accumulate. (Earlier bug: repeated
+            # scrapes doubled up menu_items rows.)
+            local_conn.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
             if items:
-                conn.executemany("INSERT INTO menu_items(restaurant_id,category,name,description,price,price_text,dietary_tags)VALUES(?,?,?,?,?,?,?)",
-                    [(rid,i.get("category",""),i["name"],i.get("description",""),i.get("price"),i.get("price_text",""),"") for i in items])
-            conn.commit()
+                local_conn.executemany(
+                    "INSERT INTO menu_items(restaurant_id,category,name,description,price,price_text,dietary_tags) VALUES (?,?,?,?,?,?,?)",
+                    [(rid, i.get("category", ""), i["name"], i.get("description", ""), i.get("price"), i.get("price_text", ""), "") for i in items],
+                )
+            local_conn.commit()
         except Exception as e:
             logger.error(f"DB err {name}: {e}")
+            try:
+                local_conn.rollback()
+            except Exception:
+                pass
+        finally:
+            local_conn.close()
         return status, len(items)
 
 
@@ -335,8 +356,14 @@ async def run_chunk(chunk_size=40):
     )
     sem = asyncio.Semaphore(CONCURRENT)
 
+    # Close the chunk-level connection BEFORE dispatching scrape tasks.
+    # The chunk-level connection was only needed for the row selection
+    # above; each scrape_one task opens its own connection for writes
+    # so concurrent tasks can't corrupt each other under WAL.
+    conn.close()
+
     ok = 0; fail = 0; item_count = 0
-    tasks = [scrape_one(ctx, r[0], r[1], r[2], conn, sem) for r in rows]
+    tasks = [scrape_one(ctx, r[0], r[1], r[2], sem) for r in rows]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
         if isinstance(r, Exception):
@@ -349,11 +376,14 @@ async def run_chunk(chunk_size=40):
     await ctx.close()
     await browser.close()
 
-    # Current totals
-    total_items = conn.execute("SELECT COUNT(*) FROM menu_items").fetchone()[0]
-    success_count = conn.execute("SELECT COUNT(*) FROM restaurants WHERE scrape_status='success'").fetchone()[0]
-    remaining = conn.execute("SELECT COUNT(*) FROM restaurants WHERE scrape_status='pending'").fetchone()[0]
-    conn.close()
+    # Re-open a fresh connection for the post-scrape stats — the
+    # chunk-level connection was closed before dispatch to avoid
+    # collision with per-task writers.
+    stats_conn = sqlite3.connect(DB_PATH)
+    total_items = stats_conn.execute("SELECT COUNT(*) FROM menu_items").fetchone()[0]
+    success_count = stats_conn.execute("SELECT COUNT(*) FROM restaurants WHERE scrape_status='success'").fetchone()[0]
+    remaining = stats_conn.execute("SELECT COUNT(*) FROM restaurants WHERE scrape_status='pending'").fetchone()[0]
+    stats_conn.close()
 
     logger.info(f"Chunk done: {ok} OK, {fail} fail, {item_count} new items")
     logger.info(f"Cumulative: {success_count} successful restaurants, {total_items} total menu items, {remaining} remaining")
