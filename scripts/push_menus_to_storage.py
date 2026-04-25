@@ -87,15 +87,29 @@ SECTION_HEADER_WORDS = {
     "soups", "desserts", "drinks", "beverages", "beers", "wines", "cocktails",
     "mains", "entrees", "entrées", "noodles", "rice", "dumplings", "specials",
     "breakfast", "lunch", "dinner", "brunch", "kids menu", "for the table",
+    # Multi-word headers seen in the wild
+    "low proof cocktails", "high proof cocktails",
+    "breads & sides", "breads and sides",
+    "small plates", "large plates", "shareables",
+    "from the grill", "from the oven", "from the bar",
+    "house specialties", "house favorites", "chef's specials",
+    "raw bar", "tasting menu", "prix fixe",
+    "cold appetizers", "hot appetizers",
+    "wine list", "by the glass", "by the bottle",
+    "white wines", "red wines", "sparkling wines",
 }
 
-# Wine-grape / region words. When combined with a year (4-digit), the entry
-# is almost certainly a wine list item, not a dish.
+# Wine-grape / region words. When combined with a year (4-digit) OR
+# multiple commas (a wine descriptor "Grape, Producer, Region"), the
+# entry is almost certainly a wine list item, not a dish.
 _WINE_WORDS = re.compile(
     r"\b(cabernet|sauvignon|chardonnay|pinot|merlot|syrah|riesling|"
     r"malbec|sangiovese|nebbiolo|tempranillo|burgundy|bordeaux|"
-    r"prosecco|champagne|rosé|rose|chianti|barolo|barbera|zinfandel|"
-    r"vineyard|valley|reserve|estate)\b",
+    r"prosecco|champagne|chianti|barolo|barbera|zinfandel|"
+    r"grolleau|gamay|grenache|tempranillo|albariño|albarino|gewurztraminer|"
+    r"viognier|gruner|verdejo|nero d'avola|"
+    r"vineyard|valley|reserve|estate|domaine|chateau|château|loire|alsace|"
+    r"napa|sonoma|piedmont|tuscany|rioja|provence)\b",
     re.IGNORECASE,
 )
 _YEAR_PREFIX = re.compile(r"^\d{4}\b")
@@ -123,8 +137,11 @@ def is_dishlike(name: str) -> bool:
     if len(s) > MAX_DISH_NAME_LEN:
         return False
     low = s.lower()
-    # Section headers: short ALL-CAPS strings matching a known header word.
-    if s == s.upper() and s.lower() in SECTION_HEADER_WORDS:
+    # Section headers: any case (not just ALL-CAPS) matching a known
+    # header word. Catches both "APPETIZERS" and "Appetizers" /
+    # "Low Proof Cocktails" — section labels that leak into menu_items
+    # when the scraper can't tell a header from a dish.
+    if low in SECTION_HEADER_WORDS:
         return False
     # Description prose: starts with a known prose marker.
     for prefix in DESCRIPTION_PREFIXES:
@@ -134,11 +151,16 @@ def is_dishlike(name: str) -> bool:
     # ("Served with jasmine rice, bok choy, and scallions")
     if s.count(",") >= 3:
         return False
-    # Wine list entries: year prefix ("2012 Silver Oak..."), or a year
-    # anywhere combined with a grape/wine word ("Syrah ... 2019").
+    # Wine list entries:
+    #   - year prefix ("2012 Silver Oak…")
+    #   - year anywhere combined with a grape/wine word ("Syrah … 2019")
+    #   - 2+ commas combined with a grape/wine word
+    #     ("Grolleau, Domaine Du Haute Bourge, Loire" — no year)
     if _YEAR_PREFIX.search(s):
         return False
     if _HAS_YEAR.search(s) and _WINE_WORDS.search(s):
+        return False
+    if s.count(",") >= 2 and _WINE_WORDS.search(s):
         return False
     # JS / code leakage from the source page (rare but ugly when it happens)
     if _CODE_NOISE.search(s):
@@ -201,6 +223,19 @@ def build_menu_payload(
             d["description"],
             price_val if price_val > 0 else None,
         )
+
+        # Post-normalize re-check. If the cleaned name turns out to be
+        # a section header (e.g. "BeersNorth Coast Ale" splits into
+        # name="Beers", desc="North Coast Ale"), swap them so the real
+        # dish becomes the name. Drop entirely if both ends are bad.
+        if not is_dishlike(item["n"]):
+            desc = item.get("d", "")
+            if desc and is_dishlike(desc):
+                item["n"] = desc
+                item.pop("d", None)
+            else:
+                dropped_noise += 1
+                continue
 
         # Dedupe on the CLEANED name so post-normalization duplicates
         # collapse (e.g. two raw inputs that title-case to the same

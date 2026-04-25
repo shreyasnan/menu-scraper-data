@@ -55,10 +55,15 @@ _VERB_GLUE = re.compile(
 
 def split_fused_name(name: str) -> tuple[str, str | None]:
     """If `name` looks fused, return (clean_name, extracted_desc).
-    Otherwise return (name, None). Conservative — long names with no
-    detectable boundary stay as-is."""
+    Otherwise return (name, None). Conservative — short names without
+    a detectable boundary stay as-is, but the post-match length checks
+    (head >= 4 chars, tail >= 12 chars) prevent over-aggressive splits
+    on legitimately short dish names."""
     s = (name or "").strip()
-    if len(s) < 30:
+    # Was 30 — too high; missed cases like "BeersNorth Coast Ale" (19)
+    # and "salmonseasoned with miso" (22). Post-match length checks
+    # below are the real safety net.
+    if len(s) < 16:
         return s, None
 
     # Strategy 1: lowercase → Capital boundary.
@@ -144,7 +149,11 @@ def title_case_dish(name: str) -> str:
 # that pattern.
 
 _CAPS_PREFIX = re.compile(
-    r"^([A-Z][A-Z0-9 \-]+?)\s+-\s+(.+)$"
+    # Head: at least one all-caps token, optionally including digits,
+    # spaces, hyphens, apostrophes, periods (for "I'M", "G.O.A.T", etc.)
+    # Separator: optional leading whitespace, dash, required trailing
+    # whitespace — so it matches both "SPICE BOY - Goat" and "SHEESH- lamb".
+    r"^([A-Z][A-Z0-9 \-\.\']+?)\s*-\s+(.+)$"
 )
 
 
@@ -155,10 +164,11 @@ def strip_caps_prefix(name: str) -> str:
     if not m:
         return name
     head, tail = m.group(1).strip(), m.group(2).strip()
-    # Sanity: the head must be ALL-CAPS (allowing digits, spaces, hyphens)
+    # Sanity: the head must be ALL-CAPS (its alpha chars all uppercase)
     # and the tail must be at least 4 chars and contain a lowercase
     # letter (so we don't strip "BBQ - 12 OZ" type cases).
-    if head != head.upper():
+    head_alpha = "".join(c for c in head if c.isalpha())
+    if not head_alpha or head_alpha != head_alpha.upper():
         return name
     if len(tail) < 4 or not any(c.islower() for c in tail):
         return name

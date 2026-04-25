@@ -128,6 +128,28 @@ def main() -> int:
         strip_caps_prefix("BBQ - 12 OZ"),
         "BBQ - 12 OZ",
     )
+    # Round 2: no-space dash variant
+    failures += _check(
+        "strip 'SHEESH- lamb Seekh Kebab' (no leading space)",
+        strip_caps_prefix("SHEESH- lamb Seekh Kebab"),
+        "lamb Seekh Kebab",
+    )
+    failures += _check(
+        "strip 'CRABOOM- Crab Cake'",
+        strip_caps_prefix("CRABOOM- Crab Cake"),
+        "Crab Cake",
+    )
+    # Apostrophe + period in head
+    failures += _check(
+        "strip \"I'M NOT PASTA- spinach paneer lasagna (D)\"",
+        strip_caps_prefix("I'M NOT PASTA- spinach paneer lasagna (D)"),
+        "spinach paneer lasagna (D)",
+    )
+    failures += _check(
+        "strip 'G.O.A.T-  Kholapuri Goat Curry (D)' (period in head, double space)",
+        strip_caps_prefix("G.O.A.T-  Kholapuri Goat Curry (D)"),
+        "Kholapuri Goat Curry (D)",
+    )
 
     print("\n=== normalize_dish (end-to-end) ===")
     failures += _check(
