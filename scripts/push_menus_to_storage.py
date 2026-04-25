@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -88,6 +89,26 @@ SECTION_HEADER_WORDS = {
     "breakfast", "lunch", "dinner", "brunch", "kids menu", "for the table",
 }
 
+# Wine-grape / region words. When combined with a year (4-digit), the entry
+# is almost certainly a wine list item, not a dish.
+_WINE_WORDS = re.compile(
+    r"\b(cabernet|sauvignon|chardonnay|pinot|merlot|syrah|riesling|"
+    r"malbec|sangiovese|nebbiolo|tempranillo|burgundy|bordeaux|"
+    r"prosecco|champagne|rosé|rose|chianti|barolo|barbera|zinfandel|"
+    r"vineyard|valley|reserve|estate)\b",
+    re.IGNORECASE,
+)
+_YEAR_PREFIX = re.compile(r"^\d{4}\b")
+_HAS_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+# Generic JS/code leakage patterns we've seen in scraped output.
+_CODE_NOISE = re.compile(
+    r"^(window|document|var|let|const|function)\b|"
+    r"\bwindow\.\w+|\bdocument\.\w+|"
+    r"^\(function\b|=>\s*\{|"
+    r"\.\w+\s*=\s*",
+    re.IGNORECASE,
+)
+
 
 def is_dishlike(name: str) -> bool:
     """Cheap heuristic: does this look like a real dish name, or scraper noise?
@@ -112,6 +133,19 @@ def is_dishlike(name: str) -> bool:
     # 3+ commas strongly suggests a descriptive sentence, not a dish name.
     # ("Served with jasmine rice, bok choy, and scallions")
     if s.count(",") >= 3:
+        return False
+    # Wine list entries: year prefix ("2012 Silver Oak..."), or a year
+    # anywhere combined with a grape/wine word ("Syrah ... 2019").
+    if _YEAR_PREFIX.search(s):
+        return False
+    if _HAS_YEAR.search(s) and _WINE_WORDS.search(s):
+        return False
+    # JS / code leakage from the source page (rare but ugly when it happens)
+    if _CODE_NOISE.search(s):
+        return False
+    # Pipe-separated metadata ("Mon-Fri | Three Course Office Lunch Menu")
+    # is almost always nav/info text, not a dish.
+    if " | " in s:
         return False
     return True
 

@@ -114,13 +114,55 @@ def title_case_dish(name: str) -> str:
         if w in {"&", "+", "/"}:
             out.append(w)
             continue
+        # Preserve words whose alpha letters are all uppercase
+        # (acronyms, dietary tags like "(D)", "(GF)", "BBQ", "DJ").
+        alpha = "".join(c for c in w if c.isalpha())
+        if alpha and alpha == alpha.upper():
+            out.append(w)
+            continue
         wl = w.lower()
         if i > 0 and wl in _LOWER_STOPS:
             out.append(wl)
         else:
-            # Title-case while preserving trailing punctuation if any.
+            # Title-case the leading alpha char; lowercase the rest.
+            # Punctuation passes through unchanged because we only
+            # touch the first alpha position.
             out.append(w[:1].upper() + w[1:].lower())
     return " ".join(out)
+
+
+# ---------------------------------------------------------------------------
+# ALL-CAPS prefix stripping
+# ---------------------------------------------------------------------------
+#
+# Aurum's menu in the wild produces things like:
+#   "SALLMON-ELLA-FREE - tandoori salmon (D)"
+#   "SPICE BOY - Goat Biryani (D)"
+#   "BASSES - Sea Bass Curry"
+# where the all-caps part is a dish-section pun/codeword and the real
+# dish name lives after the dash. Strip the all-caps lead when we see
+# that pattern.
+
+_CAPS_PREFIX = re.compile(
+    r"^([A-Z][A-Z0-9 \-]+?)\s+-\s+(.+)$"
+)
+
+
+def strip_caps_prefix(name: str) -> str:
+    """If `name` is `'ALL CAPS WORDS - real dish'`, return just the
+    real-dish part. Otherwise return name unchanged."""
+    m = _CAPS_PREFIX.match(name.strip())
+    if not m:
+        return name
+    head, tail = m.group(1).strip(), m.group(2).strip()
+    # Sanity: the head must be ALL-CAPS (allowing digits, spaces, hyphens)
+    # and the tail must be at least 4 chars and contain a lowercase
+    # letter (so we don't strip "BBQ - 12 OZ" type cases).
+    if head != head.upper():
+        return name
+    if len(tail) < 4 or not any(c.islower() for c in tail):
+        return name
+    return tail
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +178,14 @@ def normalize_dish(
     """Take a scraped (name, description, price) and return a cleaned
     `{n, d?, p?}` payload ready to ship to Storage.
 
+    - Strips ALL-CAPS section-name prefixes ("SPICE BOY - Goat Biryani"
+      → "Goat Biryani").
     - Splits a fused name when detected.
     - Title-cases mostly-lowercase names.
     - Preserves an existing description; falls back to the extracted
       tail from a split if no description was given.
     """
+    name = strip_caps_prefix(name)
     head, tail = split_fused_name(name)
     head = title_case_dish(head)
 

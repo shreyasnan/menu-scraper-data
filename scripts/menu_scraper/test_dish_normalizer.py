@@ -6,7 +6,9 @@ Cases drawn from real Shizen / SF Bay Area scraper output that
 exposed the fused-name-and-lowercased-name bug.
 """
 
-from menu_scraper.dish_normalizer import normalize_dish, split_fused_name, title_case_dish
+from menu_scraper.dish_normalizer import (
+    normalize_dish, split_fused_name, title_case_dish, strip_caps_prefix
+)
 
 
 def _check(label: str, got, expected) -> bool:
@@ -100,6 +102,33 @@ def main() -> int:
         "Spicy Garlic Miso",
     )
 
+    print("\n=== strip_caps_prefix ===")
+    failures += _check(
+        "strip 'SPICE BOY - Goat Biryani'",
+        strip_caps_prefix("SPICE BOY - Goat Biryani"),
+        "Goat Biryani",
+    )
+    failures += _check(
+        "strip 'SALLMON-ELLA-FREE - tandoori salmon (D)'",
+        strip_caps_prefix("SALLMON-ELLA-FREE - tandoori salmon (D)"),
+        "tandoori salmon (D)",
+    )
+    failures += _check(
+        "strip 'BASSES - Sea Bass Curry'",
+        strip_caps_prefix("BASSES - Sea Bass Curry"),
+        "Sea Bass Curry",
+    )
+    failures += _check(
+        "leave clean dish unchanged",
+        strip_caps_prefix("Margherita Pizza"),
+        "Margherita Pizza",
+    )
+    failures += _check(
+        "leave 'BBQ - 12 oz' alone (tail too short / no lowercase)",
+        strip_caps_prefix("BBQ - 12 OZ"),
+        "BBQ - 12 OZ",
+    )
+
     print("\n=== normalize_dish (end-to-end) ===")
     failures += _check(
         "fused + lowercase Shizen item → fully cleaned",
@@ -146,6 +175,16 @@ def main() -> int:
             None,
         ),
         {"n": "Shizen Shiitake", "d": "Custom note from waiter"},
+    )
+    failures += _check(
+        "Aurum: SPICE BOY - Goat Biryani → cleaned",
+        normalize_dish("SPICE BOY - Goat Biryani (D)", None, None),
+        {"n": "Goat Biryani (D)"},
+    )
+    failures += _check(
+        "Aurum: SALLMON-ELLA-FREE - tandoori salmon (D) → cleaned",
+        normalize_dish("SALLMON-ELLA-FREE - tandoori salmon (D)", None, None),
+        {"n": "Tandoori Salmon (D)"},
     )
 
     print()
